@@ -12,80 +12,25 @@ const BG  = "#FFFFFF";
 const RED = "#EF4444";
 const REDL = "#FEF2F2";
 
-// ── GEMINI ───────────────────────────────────────────────────
-async function callGemini(apiKey, prompt, maxTokens = 2048) {
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.3, maxOutputTokens: maxTokens },
-      }),
-    }
-  );
-  const data = await res.json();
-  if (data.error) throw new Error(data.error.message);
-  return data.candidates[0].content.parts[0].text;
+// ── API (backend Node.js local) ───────────────────────────────
+const API = "http://localhost:3001/api";
+
+function apiFetch(path, options = {}) {
+  const token = localStorage.getItem("token");
+  return fetch(`${API}${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...options.headers,
+    },
+  }).then(async (r) => {
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || "Erro na requisição");
+    return data;
+  });
 }
 
-// ── SUB-AGENTES ──────────────────────────────────────────────
-async function agentKPI(key, csv, empresa, segmento) {
-  const prompt = `Analista de dados sênior especializado em ${segmento}.
-Analise o CSV e retorne APENAS JSON válido, sem markdown, sem backticks.
-Estrutura exata:
-{"periodo":"string","totalVendas":0,"totalCancelamentos":0,"taxaCancelamento":0,"receitaBruta":0,"custoTotal":0,"lucroBruto":0,"margemBruta":0,"ticketMedio":0,"melhorProduto":"string","piorProduto":"string","melhorCategoria":"string","tendencia":"crescimento","alertas":["string"],"destaques":["string"],"recomendacoes":["string"]}
-Empresa: ${empresa} | Segmento: ${segmento}
-Dados:
-${csv}`;
-  const raw = await callGemini(key, prompt, 1024);
-  try {
-    return JSON.parse(raw.replace(/```json|```/g, "").trim());
-  } catch {
-    const m = raw.match(/\{[\s\S]*\}/);
-    if (m) return JSON.parse(m[0]);
-    throw new Error("Agente KPI retornou formato inválido");
-  }
-}
-
-async function agentReport(key, kpis, empresa, segmento) {
-  const prompt = `Consultor de negócios sênior especializado em ${segmento}.
-Gere relatório executivo COMPLETO em HTML puro. SEM markdown, SEM backticks.
-Tags permitidas: div h1 h2 h3 p table thead tbody tr td th ul li strong em hr.
-Seções obrigatórias:
-1) Cabeçalho com empresa e período
-2) Sumário Executivo
-3) Tabela de KPIs completa
-4) Análise por produto e categoria
-5) Insights estratégicos
-6) Recomendações numeradas (3-4 ações)
-7) Rodapé "Relatório gerado por RelatorIA"
-Use emojis nos títulos. Português brasileiro formal.
-Empresa: ${empresa} | Segmento: ${segmento}
-KPIs: ${JSON.stringify(kpis)}`;
-  return callGemini(key, prompt, 2048);
-}
-
-async function agentPitch(key, kpis, empresa, plano, valor) {
-  const prompt = `Especialista em vendas B2B. Escreva pitch de renovação mensal em português brasileiro.
-4 parágrafos: 1)Agradecimento+resumo em dados 2)Principal insight 3)Próximo mês 4)CTA renovação.
-Máximo 180 palavras. Texto corrido, sem markdown.
-Cliente: ${empresa} | Plano: ${plano} (R$${valor}/mês)
-KPIs: receita ${kpis.receitaBruta}, lucro ${kpis.lucroBruto}, tendência ${kpis.tendencia}`;
-  return callGemini(key, prompt, 512);
-}
-
-// ── STORAGE (localStorage pra uso local) ─────────────────────
-const save = (k, v) => {
-  try { localStorage.setItem(k, JSON.stringify(v)); } catch {}
-};
-const load = (k, fb) => {
-  try {
-    const r = localStorage.getItem(k);
-    return r ? JSON.parse(r) : fb;
-  } catch { return fb; }
-};
 
 // ── UTILS ────────────────────────────────────────────────────
 const uid  = () => Date.now().toString(36) + Math.random().toString(36).slice(2);
@@ -176,14 +121,8 @@ function Navbar({ page, go, onLogout }) {
 
         <div style={{ width: 1, height: 18, background: BD, margin: "0 10px" }} />
 
-        <button onClick={() => go("settings")} style={{
-          background: "transparent", border: `1px solid ${BD}`,
-          borderRadius: 8, padding: "6px 12px", cursor: "pointer",
-          color: TM, fontSize: 13, fontFamily: "inherit",
-          transition: "all 0.15s",
-        }}>⚙ Config</button>
-
         {/* ── BOTÃO SAIR — VERMELHO E BONITO ── */}
+
         <button onClick={onLogout} style={{
           display: "inline-flex", alignItems: "center", gap: 6,
           background: `linear-gradient(135deg, ${RED}, #DC2626)`,
@@ -214,13 +153,28 @@ function Navbar({ page, go, onLogout }) {
 }
 
 // ── LOGIN ────────────────────────────────────────────────────
-function Login({ onLogin, storedPass }) {
+function Login({ onLogin }) {
+  const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
+  const [showPw, setShowPw] = useState(false);
   const [err, setErr] = useState("");
 
-  function go() {
-    if (pw === storedPass) onLogin();
-    else setErr("Senha incorreta. Padrão: admin123");
+
+  async function go() {
+    setErr("");
+    if (!email.trim()) return setErr("Informe o e-mail.");
+    if (!pw) return setErr("Informe a senha.");
+
+    try {
+      const data = await apiFetch("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ email, password: pw }),
+      });
+      localStorage.setItem("token", data.token);
+      onLogin();
+    } catch (e) {
+      setErr("Erro: " + e.message);
+    }
   }
 
   return (
@@ -232,24 +186,86 @@ function Login({ onLogin, storedPass }) {
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <div>
-            <label style={lbl}>Senha</label>
-            <input style={inp} type="password" value={pw}
-              onChange={e => setPw(e.target.value)}
+            <label style={lbl}>E-mail</label>
+            <input
+              style={inp}
+              type="email"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
               onKeyDown={e => e.key === "Enter" && go()}
-              placeholder="••••••••" />
+              placeholder="voce@empresa.com"
+            />
           </div>
+          <div>
+            <label style={lbl}>Senha</label>
+            <div style={{ position: "relative" }}>
+              <input
+                style={{ ...inp, paddingRight: 46 }}
+                type={showPw ? "text" : "password"}
+                value={pw}
+                onChange={e => setPw(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && go()}
+                placeholder="••••••••"
+                aria-label="Senha"
+              />
+              <button
+                type="button"
+                onClick={() => setShowPw(v => !v)}
+                aria-label={showPw ? "Ocultar senha" : "Mostrar senha"}
+                title={showPw ? "Ocultar senha" : "Mostrar senha"}
+                style={{
+                  position: "absolute",
+                  right: 10,
+                  top: "50%",
+                  transform: "translateY(-50%)",
+                  width: 30,
+                  height: 30,
+                  borderRadius: 8,
+                  border: `1px solid ${BD}`,
+                  background: "#fff",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  transition: "all 0.15s",
+                  padding: 0,
+                }}
+                onMouseEnter={e => {
+                  e.currentTarget.style.borderColor = G;
+                  e.currentTarget.style.boxShadow = `0 0 0 3px ${G}18`;
+                }}
+                onMouseLeave={e => {
+                  e.currentTarget.style.borderColor = BD;
+                  e.currentTarget.style.boxShadow = "none";
+                }}
+              >
+                {showPw ? (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={GD} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M2 12s3.8-7 10-7 10 7 10 7-3.8 7-10 7-10-7-10-7" />
+                    <circle cx="12" cy="12" r="3" />
+                  </svg>
+                ) : (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={TM} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M2 12s3.8-7 10-7 10 7 10 7-3.8 7-10 7-10-7-10-7" />
+                    <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+                    <path d="M1 1l22 22" />
+                  </svg>
+                )}
+              </button>
+            </div>
+          </div>
+
           {err && <p style={{ color: RED, fontSize: 12 }}>{err}</p>}
           <button style={{ ...btn(), width: "100%", justifyContent: "center", padding: "12px" }} onClick={go}>
             Entrar
           </button>
-          <p style={{ textAlign: "center", fontSize: 11, color: TM }}>
-            Primeira vez? Senha padrão: <strong>admin123</strong>
-          </p>
+          <p style={{ textAlign: "center", fontSize: 11, color: TM }}>Acesso via conta autorizada</p>
         </div>
       </div>
     </div>
   );
 }
+
 
 // ── DASHBOARD ────────────────────────────────────────────────
 function Dashboard({ clients, reports, go, setRep }) {
@@ -345,19 +361,31 @@ function Clients({ clients, setClients }) {
   const active = clients.filter(c => c.active);
   const mrr    = active.reduce((s, c) => s + (c.monthlyValue || 0), 0);
 
+  async function reload() {
+    const list = await apiFetch("/clients");
+    setClients(list);
+  }
+
   async function add() {
-    const n = { ...form, id: uid(), active: true, createdAt: new Date().toISOString() };
-    const u = [...clients, n];
-    setClients(u); save("ri_clients", u);
-    setShow(false);
-    setForm({ name: "", company: "", email: "", segment: "E-commerce", plan: "starter", monthlyValue: 800, notes: "" });
+    try {
+      await apiFetch("/clients", {
+        method: "POST",
+        body: JSON.stringify(form),
+      });
+      setShow(false);
+      setForm({ name: "", company: "", email: "", segment: "E-commerce", plan: "starter", monthlyValue: 800, notes: "" });
+      await reload();
+    } catch (e) {
+      alert(e.message);
+    }
   }
 
   async function rem(id) {
     if (!confirm("Remover este cliente?")) return;
-    const u = clients.filter(c => c.id !== id);
-    setClients(u); save("ri_clients", u);
+    await apiFetch(`/clients/${id}`, { method: "DELETE" });
+    await reload();
   }
+
 
   return (
     <div style={{ maxWidth: 760, margin: "0 auto", padding: "40px 24px" }}>
@@ -434,7 +462,7 @@ function Clients({ clients, setClients }) {
 }
 
 // ── NEW REPORT ───────────────────────────────────────────────
-function NewReport({ clients, reports, setReports, setRep, go, apiKey }) {
+function NewReport({ clients, setReports, setRep, go }) {
   const active      = clients.filter(c => c.active);
   const [cid,  setCid]  = useState(active[0]?.id || "");
   const [csv,  setCsv]  = useState("");
@@ -442,6 +470,7 @@ function NewReport({ clients, reports, setReports, setRep, go, apiKey }) {
   const [err,  setErr]  = useState("");
   const [fileName, setFileName] = useState("");
   const fileInputRef = useRef(null);
+
 
   function readFile(e) {
     const file = e.target.files[0];
@@ -457,22 +486,32 @@ function NewReport({ clients, reports, setReports, setRep, go, apiKey }) {
   }
 
   async function generate() {
-    if (!apiKey)    { setErr("Configure a chave Gemini em ⚙ Configurações."); return; }
-    if (!cid)       { setErr("Selecione um cliente.");                         return; }
-    if (!csv.trim()){ setErr("Cole ou faça upload dos dados CSV.");             return; }
+    if (!cid)       { setErr("Selecione um cliente."); return; }
+    if (!csv.trim()){ setErr("Cole ou faça upload dos dados CSV."); return; }
     setErr("");
-    const c = clients.find(x => x.id === cid);
+
     try {
-      setStep(1); const kpis  = await agentKPI   (apiKey, csv,  c.company, c.segment);
-      setStep(2); const html  = await agentReport (apiKey, kpis, c.company, c.segment);
-      setStep(3); const pitch = await agentPitch  (apiKey, kpis, c.company, c.plan, c.monthlyValue);
-      const nr = { id: uid(), clientId: cid, rawData: csv, kpis, reportHtml: html, pitchText: pitch, createdAt: new Date().toISOString() };
-      const u  = [nr, ...reports];
-      setReports(u); save("ri_reports", u);
+      setStep(1);
+      const res = await apiFetch("/reports/generate", {
+        method: "POST",
+        body: JSON.stringify({ client_id: cid, csv_data: csv }),
+      });
+
+      const { report } = res || {};
+      if (!report?.id) throw new Error("Resposta inválida do servidor.");
+
       setStep(4);
-      setTimeout(() => { setRep(nr.id); go("report-detail"); }, 700);
-    } catch (e) { setErr("Erro: " + e.message); setStep(0); }
+      // Recarrega via App para manter estado consistente
+      setTimeout(() => {
+        setRep(report.id);
+        go("report-detail");
+      }, 700);
+    } catch (e) {
+      setErr("Erro: " + e.message);
+      setStep(0);
+    }
   }
+
 
   const steps = [
     { n: 1, l: "Agente KPI",      d: "Extraindo métricas dos dados..."    },
@@ -561,6 +600,7 @@ function NewReport({ clients, reports, setReports, setRep, go, apiKey }) {
 
 // ── REPORTS LIST ─────────────────────────────────────────────
 function Reports({ reports, clients, setRep, go }) {
+
   return (
     <div style={{ maxWidth: 760, margin: "0 auto", padding: "40px 24px" }}>
       <h2 style={{ fontSize: 20, fontWeight: 900, margin: "0 0 22px", color: TX }}>Relatórios</h2>
@@ -592,12 +632,20 @@ function Reports({ reports, clients, setRep, go }) {
 }
 
 // ── REPORT DETAIL ────────────────────────────────────────────
-function ReportDetail({ repId, reports, clients, go }) {
+function ReportDetail({ repId, clients, go }) {
   const [tab, setTab] = useState("relatorio");
-  const r = reports.find(x => x.id === repId);
+  const [r, setR] = useState(null);
+
+  useEffect(() => {
+    if (!repId) return;
+    apiFetch(`/reports/${repId}`).then(setR).catch(() => setR(null));
+  }, [repId]);
+
   if (!r) return <div style={{ padding: 40, color: TM }}>Relatório não encontrado.</div>;
+
   const c = clients.find(x => x.id === r.clientId);
   const k = r.kpis || {};
+
 
   const kpiCards = [
     { l: "Receita Bruta",   v: brl(k.receitaBruta),    co: G    },
@@ -696,46 +744,7 @@ function ReportDetail({ repId, reports, clients, go }) {
   );
 }
 
-// ── SETTINGS ─────────────────────────────────────────────────
-function Settings({ apiKey, setApiKey, password, setPassword }) {
-  const [k, setK] = useState(apiKey);
-  const [p, setP] = useState(password);
-  const [ok, setOk] = useState(false);
 
-  function saveAll() {
-    setApiKey(k); setPassword(p);
-    save("ri_apikey", k); save("ri_password", p);
-    setOk(true); setTimeout(() => setOk(false), 2000);
-  }
-
-  return (
-    <div style={{ maxWidth: 540, margin: "0 auto", padding: "40px 24px" }}>
-      <h2 style={{ fontSize: 20, fontWeight: 900, margin: "0 0 22px", color: TX }}>⚙ Configurações</h2>
-      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-        <div style={card}>
-          <h3 style={{ fontSize: 13, fontWeight: 700, margin: "0 0 10px", color: TX }}>🔑 Chave Gemini API</h3>
-          <p style={{ fontSize: 12, color: TM, marginBottom: 10 }}>
-            Gratuita em{" "}
-            <a href="https://aistudio.google.com" target="_blank" rel="noreferrer" style={{ color: G, fontWeight: 600 }}>
-              aistudio.google.com
-            </a>{" "}
-            — sem cartão de crédito
-          </p>
-          <label style={lbl}>GEMINI_API_KEY</label>
-          <input style={inp} type="password" value={k} onChange={e => setK(e.target.value)} placeholder="AIzaSy..." />
-        </div>
-        <div style={card}>
-          <h3 style={{ fontSize: 13, fontWeight: 700, margin: "0 0 10px", color: TX }}>🔒 Senha de acesso</h3>
-          <label style={lbl}>Nova senha</label>
-          <input style={inp} type="password" value={p} onChange={e => setP(e.target.value)} placeholder="Mínimo 6 caracteres" />
-        </div>
-        <button style={{ ...btn(), padding: "13px", justifyContent: "center", fontSize: 14 }} onClick={saveAll}>
-          {ok ? "✓ Configurações salvas!" : "Salvar configurações"}
-        </button>
-      </div>
-    </div>
-  );
-}
 
 // ── APP ──────────────────────────────────────────────────────
 export default function App() {
@@ -744,18 +753,28 @@ export default function App() {
   const [clients,  setClients ] = useState([]);
   const [reports,  setReports ] = useState([]);
   const [rep,      setRep     ] = useState(null);
-  const [apiKey,   setApiKey  ] = useState("");
-  const [password, setPassword] = useState("admin123");
 
-  // Carrega do localStorage na inicialização
   useEffect(() => {
-    setClients (load("ri_clients",  []));
-    setReports (load("ri_reports",  []));
-    setApiKey  (load("ri_apikey",   ""));
-    setPassword(load("ri_password", "admin123"));
+    const t = localStorage.getItem("token");
+    if (!t) return;
+    setLogged(true);
+
+    apiFetch("/clients").then(setClients).catch(() => setClients([]));
+    apiFetch("/reports").then(setReports).catch(() => setReports([]));
   }, []);
 
-  if (!logged) return <Login onLogin={() => setLogged(true)} storedPass={password} />;
+  async function logout() {
+    localStorage.removeItem("token");
+    setLogged(false);
+    setPage("dashboard");
+    setClients([]);
+    setReports([]);
+    setRep(null);
+  }
+
+
+  if (!logged) return <Login onLogin={() => setLogged(true)} />;
+
 
   return (
     <div style={{ minHeight: "100vh", background: BG, fontFamily: "'Inter', system-ui, sans-serif" }}>
@@ -771,14 +790,15 @@ export default function App() {
         button:active { transform: scale(0.98); }
       `}</style>
 
-      <Navbar page={page} go={setPage} onLogout={() => setLogged(false)} />
+      <Navbar page={page} go={setPage} onLogout={logout} />
+
 
       {page === "dashboard"     && <Dashboard  clients={clients} reports={reports} go={setPage} setRep={setRep} />}
       {page === "clients"       && <Clients    clients={clients} setClients={setClients} />}
-      {page === "new-report"    && <NewReport  clients={clients} reports={reports} setReports={setReports} setRep={setRep} go={setPage} apiKey={apiKey} />}
+      {page === "new-report"    && <NewReport  clients={clients} setReports={setReports} setRep={setRep} go={setPage} />}
       {page === "reports"       && <Reports    reports={reports} clients={clients} setRep={setRep} go={setPage} />}
-      {page === "report-detail" && <ReportDetail repId={rep} reports={reports} clients={clients} go={setPage} />}
-      {page === "settings"      && <Settings   apiKey={apiKey} setApiKey={setApiKey} password={password} setPassword={setPassword} />}
+      {page === "report-detail" && <ReportDetail repId={rep} clients={clients} go={setPage} />}
     </div>
+
   );
 }
